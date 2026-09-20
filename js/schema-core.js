@@ -140,6 +140,15 @@ class SchemaRegistry {
       if (s.then) push(s.then);
       if (s.else) push(s.else);
       if (Array.isArray(s.allOf)) s.allOf.forEach(push);
+      // dependencies values are schemas or arrays of property names; only
+      // the schema form can contain subschemas / refs. `default` is data
+      // and is deliberately never walked.
+      if (s.dependencies) {
+        for (const k of Object.keys(s.dependencies)) {
+          const dep = s.dependencies[k];
+          if (dep && typeof dep === "object" && !Array.isArray(dep)) push(dep);
+        }
+      }
       // draft-07 keeps reusable schemas under definitions; their internal
       // refs are part of the same graph and must participate in cycle checks.
       if (s.definitions) for (const k of Object.keys(s.definitions)) push(s.definitions[k]);
@@ -182,6 +191,13 @@ function walkSubschemas(schema, fn) {
   if (schema.if) fn(schema.if, "if", 0);
   if (schema.then) fn(schema.then, "then", 0);
   if (schema.else) fn(schema.else, "else", 0);
+  if (Array.isArray(schema.allOf)) schema.allOf.forEach((s, i) => fn(s, "allOf", i));
+  if (schema.dependencies) {
+    for (const k of Object.keys(schema.dependencies)) {
+      const dep = schema.dependencies[k];
+      if (dep && typeof dep === "object" && !Array.isArray(dep)) fn(dep, "dependencies", k);
+    }
+  }
 }
 
 // UMD-ish: plain <script> tags (works from file://) and Node's ESM import.

@@ -275,3 +275,97 @@ test("同一 Registry 可被复用于多次校验（出表器与校验器共享�
   assert.equal(validate(1, registry.root, registry).valid, true);
   assert.equal(validate("1", registry.root, registry).valid, false);
 });
+
+test("allOf: 多支必须同时满足，失败时指出是哪一支", () => {
+  const schema = {
+    type: "object",
+    allOf: [
+      {
+        required: ["a"],
+        properties: { a: { type: "string", minLength: 2 } },
+      },
+      {
+        required: ["b"],
+        properties: { b: { type: "integer", minimum: 5 } },
+      },
+    ],
+  };
+  assert.equal(validate({ a: "ok", b: 6 }, schema).valid, true);
+
+  // 冲突：第一支类型错 + 第二支最小值错
+  const bad = validate({ a: 1, b: 2 }, schema);
+  assert.equal(bad.valid, false);
+  const atA = bad.errors.filter((e) => e.path === "/a" && e.keyword === "type");
+  assert.equal(atA.length, 1);
+  assert.match(atA[0].message, /allOf 第 1 支/);
+  const atB = bad.errors.filter((e) => e.path === "/b" && e.keyword === "minimum");
+  assert.equal(atB.length, 1);
+  assert.match(atB[0].message, /allOf 第 2 支/);
+  const summaries = bad.errors.filter((e) => e.keyword === "allOf");
+  assert.ok(summaries.some((e) => /第 1 支/.test(e.message)));
+  assert.ok(summaries.some((e) => /第 2 支/.test(e.message)));
+});
+
+test("allOf: 只挂失败的那一支，全部通过时不产生 allOf 错误", () => {
+  const schema = {
+    type: "object",
+    properties: { a: { type: "string" } },
+    allOf: [{ required: ["a"] }],
+  };
+  const ok = validate({ a: "x" }, schema);
+  assert.equal(ok.valid, true);
+  assert.equal(ok.errors.some((e) => e.keyword === "allOf"), false);
+  const miss = validate({}, schema);
+  assert.equal(miss.valid, false);
+  assert.ok(miss.errors.some((e) => e.path === "/a" && /第 1 支/.test(e.message)));
+});
+
+test("allOf: 与 additionalProperties:false 并存，合并进来的键不算未定义字段", () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: { a: { type: "string" } },
+    allOf: [{ properties: { b: { type: "integer" } } }],
+  };
+  assert.equal(validate({ a: "x", b: 2 }, schema).valid, true);
+  const r = validate({ a: "x", b: 2, hacker: true }, schema);
+  assert.ok(r.errors.some((e) => e.path === "/hacker"));
+});
+
+test("dependencies: 数组形式按属性存在触发必填", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      billing: { type: "object" },
+      card: { type: "string" },
+    },
+    dependencies: { card: ["billing"] },
+  };
+  assert.equal(validate({}, schema).valid, true);
+  assert.equal(validate({ billing: {} }, schema).valid, true);
+  const r = validate({ card: "x" }, schema);
+  assert.equal(r.valid, false);
+  assert.ok(r.errors.some((e) => e.path === "/billing" && e.keyword === "dependencies"));
+  assert.equal(validate({ card: "x", billing: {} }, schema).valid, true);
+});
+
+test("dependencies: schema 形式可嵌套 if/then（枚举选值触发字段组）", () => {
+  const schema = {
+    type: "object",
+    properties: { mode: { enum: ["simple", "advanced"] } },
+    dependencies: {
+      mode: {
+        if: { properties: { mode: { const: "advanced" } }, required: ["mode"] },
+        then: {
+          required: ["detail"],
+          properties: { detail: { type: "string", minLength: 2 } },
+        },
+      },
+    },
+  };
+  assert.equal(validate({ mode: "simple" }, schema).valid, true);
+  assert.equal(validate({ mode: "advanced", detail: "ok" }, schema).valid, true);
+  const r = validate({ mode: "advanced" }, schema);
+  assert.equal(r.valid, false);
+  assert.ok(r.errors.some((e) => e.path === "/detail" && e.keyword === "required"));
+});

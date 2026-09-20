@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { installDomShim, findAll, FakeDocument } from "./dom-shim.mjs";
+import { installDomShim, findAll, findByPath, FakeDocument } from "./dom-shim.mjs";
 
 installDomShim();
 
@@ -197,4 +197,139 @@ test("数字输入：合法数字转 number，非法文本保留并报类型错"
   assert.strictEqual(form.getAt(["age"]), "abc");
   const result = form.submit();
   assert.ok(result.errors.some((e) => e.path === "/age" && e.keyword === "type"));
+});
+
+test("dependencies：枚举选了 advanced 才出现字段；切回 simple 后隐藏并清掉脏值", () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: { mode: { enum: ["simple", "advanced"] } },
+    dependencies: {
+      mode: {
+        if: { properties: { mode: { const: "advanced" } }, required: ["mode"] },
+        then: {
+          required: ["detail"],
+          properties: { detail: { type: "string", minLength: 2 } },
+        },
+      },
+    },
+  };
+  const root = FakeDocument.createElement("div");
+  const f = new SchemaForm(root, schema);
+  f.setJSON({ mode: "advanced", detail: "secret" });
+  assert.ok(findByPath(root, "/detail").length > 0, "advanced 时 detail 应渲染");
+  assert.deepEqual(JSON.parse(f.toJSONString()), { mode: "advanced", detail: "secret" });
+
+  const sel = findByPath(root, "/mode")[0];
+  sel.value = "simple";
+  sel.dispatch("change");
+
+  assert.equal(findByPath(root, "/detail").length, 0, "切回 simple 后 detail 应消失");
+  assert.deepEqual(JSON.parse(f.toJSONString()), { mode: "simple" });
+  // 输出 JSON 再用同一 schema 校验必须通过
+  assert.equal(validate(JSON.parse(f.toJSONString()), schema).valid, true);
+  const result = f.submit();
+  assert.equal(result.valid, true);
+});
+
+test("if/then：隐藏分支的旧值在切换枚举后也被清掉（旧能力回归）", () => {
+  const schema = {
+    type: "object",
+    properties: { kind: { enum: ["email", "phone"] } },
+    if: { properties: { kind: { const: "email" } }, required: ["kind"] },
+    then: { properties: { primary: { type: "boolean" } } },
+    else: { properties: { sms: { type: "boolean" } } },
+  };
+  const root = FakeDocument.createElement("div");
+  const f = new SchemaForm(root, schema);
+  f.setJSON({ kind: "phone", sms: true });
+  assert.ok(findByPath(root, "/sms").length > 0);
+  const sel = findByPath(root, "/kind")[0];
+  sel.value = "email";
+  sel.dispatch("change");
+  assert.deepEqual(JSON.parse(f.toJSONString()), { kind: "email" });
+  assert.equal(findByPath(root, "/sms").length, 0);
+});
+
+test("数组 object 新增行携带 schema 默认值（含嵌套）", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      items: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            kind: { enum: ["a", "b"], default: "a" },
+            qty: { type: "integer", default: 1 },
+            meta: {
+              type: "object",
+              properties: { tag: { type: "string", default: "new" } },
+            },
+          },
+        },
+      },
+    },
+  };
+  const root = FakeDocument.createElement("div");
+  const f = new SchemaForm(root, schema);
+  f.setJSON({ items: [] });
+  const add = findAll(root, "button").find((b) => b.textContent.includes("添加"));
+  add.dispatch("click");
+  assert.deepEqual(JSON.parse(f.toJSONString()), {
+    items: [{ kind: "a", qty: 1, meta: { tag: "new" } }],
+  });
+});
+
+test("数组：删除中间行后，错误下标路径跟着迁移", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      items: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["v"],
+          properties: { v: { type: "integer" } },
+        },
+      },
+    },
+  };
+  const root = FakeDocument.createElement("div");
+  const f = new SchemaForm(root, schema);
+  f.setJSON({ items: [{ v: 1 }, { v: "bad" }, { v: 3 }] });
+  let r = f.submit();
+  assert.ok(r.errors.some((e) => e.path === "/items/1/v"));
+
+  const dels = findAll(root, "button").filter((b) => b.textContent.includes("删除"));
+  dels[0].dispatch("click"); // delete row 0 -> the bad row becomes index 0
+
+  assert.deepEqual(JSON.parse(f.toJSONString()), { items: [{ v: "bad" }, { v: 3 }] });
+  r = f.submit();
+  assert.ok(r.errors.some((e) => e.path === "/items/0/v"), "错误应迁移到 /items/0/v");
+  assert.equal(r.errors.some((e) => e.path === "/items/1/v"), false);
+});
+
+test("allOf：多支字段平铺渲染，且一起校验", () => {
+  const schema = {
+    type: "object",
+    required: ["a"],
+    properties: { a: { type: "string" } },
+    allOf: [
+      { required: ["b"], properties: { b: { type: "integer" } } },
+      { properties: { c: { type: "boolean" } } },
+    ],
+  };
+  const root = FakeDocument.createElement("div");
+  const f = new SchemaForm(root, schema);
+  f.setJSON({ a: "x", b: 2, c: true });
+  assert.ok(findByPath(root, "/a").length > 0);
+  assert.ok(findByPath(root, "/b").length > 0);
+  assert.ok(findByPath(root, "/c").length > 0);
+  assert.equal(f.submit().valid, true);
+
+  f.setJSON({ a: "x", b: "not-int" });
+  const r = f.submit();
+  assert.equal(r.valid, false);
+  assert.ok(r.errors.some((e) => e.path === "/b" && /allOf 第 1 支/.test(e.message)));
 });

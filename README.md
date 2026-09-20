@@ -41,6 +41,18 @@ npx serve .
 - `oneOf`：先选哪一支，再渲染该支字段；选了某支但内容不符会校验失败。
 - `if` / `then` / `else`：按当前值动态只渲染命中的一边，支持嵌套；
   两边不会同时铺开。
+- `allOf`：多支必须同时满足；表单把各支字段合并平铺渲染，校验失败时
+  错误信息会标明「allOf 第几支（共 N 支）」，并在当前节点挂一条
+  allOf 汇总错误；`additionalProperties:false` 会把 allOf 合并进来的键
+  视为合法字段。
+- `dependencies`（字段依赖）：支持数组形式（某字段出现时另一些字段必填）
+  与 schema 形式（依赖 schema 可再套 `if/then/else`，实现「某个枚举选了
+  才出现另一组」）。依赖分组隐藏时，其名下的旧值会立即从数据模型中
+  删除，提交、回填、实时 JSON 都不会把脏值带出去；切走 `if/then`
+  分支时同理。
+- `default`：数组元素是 object 时，新增行按 schema 声明的 `default`
+  构造（含嵌套对象的属性默认）；没有声明默认的行仍是空对象。删除
+  中间行后，剩余行的字段路径与错误下标自动重排。
 
 `boolean` 渲染为 checkbox，`enum` 渲染为 select，`array` 可以增删行。
 string 输入框在中文输入法组字期间（`compositionstart`~`compositionend`）
@@ -72,6 +84,8 @@ node --test tests/*.test.mjs
 ```
 
 测试钉死了：`$ref`（含间接引用、远程引用拒绝、悬空引用）、
-`oneOf` 恰好一支、`if/then/else`（含嵌套和不重复报错）、
-`additionalProperties: false`、循环 `$ref` 报错，以及表单回填、
-路径级错误、IME 组字、数组增删等行为。
+ `oneOf` 恰好一支、`if/then/else`（含嵌套和不重复报错）、
+ `allOf` 多支合并与分支定位报错、依赖字段显隐与隐藏清值、
+ 数组 object 新增行默认值与删中间行后路径重排、
+ `additionalProperties: false`、循环 `$ref` 报错，以及表单回填、
+ 路径级错误、IME 组字、数组增删等行为。
