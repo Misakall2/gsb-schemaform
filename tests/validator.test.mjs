@@ -275,3 +275,100 @@ test("同一 Registry 可被复用于多次校验（出表器与校验器共享�
   assert.equal(validate(1, registry.root, registry).valid, true);
   assert.equal(validate("1", registry.root, registry).valid, false);
 });
+
+test("allOf: 同时满足多支才算通过；字段由各支合并而来", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      name: { type: "string" },
+    },
+    allOf: [
+      { required: ["age"], properties: { age: { type: "integer", minimum: 0 } } },
+      { required: ["city"], properties: { city: { type: "string" } } },
+    ],
+  };
+  assert.equal(validate({ name: "x", age: 10, city: "上海" }, schema).valid, true);
+  const r = validate({ name: "x" }, schema);
+  assert.equal(r.valid, false);
+  assert.ok(
+    r.errors.some((e) => e.path === "/age" && /allOf 第 1 支/.test(e.message)),
+    "第 1 支缺字段的错误应标明支号"
+  );
+  assert.ok(
+    r.errors.some((e) => e.path === "/city" && /allOf 第 2 支/.test(e.message)),
+    "第 2 支缺字段的错误应标明支号"
+  );
+});
+
+test("allOf: 冲突（一支要求 string 一支要求 integer）失败且指出是哪一支", () => {
+  const schema = {
+    type: "object",
+    properties: { v: {} },
+    allOf: [
+      { properties: { v: { type: "string" } } },
+      { properties: { v: { type: "integer" } } },
+    ],
+  };
+  const r = validate({ v: 5 }, schema);
+  assert.equal(r.valid, false);
+  const tagged = r.errors.find(
+    (e) => e.path === "/v" && /allOf 第 1 支/.test(e.message) && /字符串/.test(e.message)
+  );
+  assert.ok(tagged, "应能从错误里看出是第 1 支要求字符串而值是数字");
+  // 第 2 支本身通过；不应再冒出一个第 2 支的噪声错误
+  assert.ok(
+    !r.errors.some((e) => e.path === "/v" && /allOf 第 2 支/.test(e.message))
+  );
+});
+
+test("allOf 分支允许 additionalProperties:false 下由分支贡献的键", () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: { a: { type: "string" } },
+    allOf: [{ properties: { b: { type: "integer" } } }],
+  };
+  assert.equal(validate({ a: "x", b: 2 }, schema).valid, true);
+  assert.equal(validate({ a: "x", c: 2 }, schema).valid, false);
+});
+
+test("dependencies: 数组形式的属性依赖", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      billing: { enum: ["invoice", "none"] },
+      taxNo: { type: "string" },
+    },
+    dependencies: { billing: ["taxNo"] },
+  };
+  assert.equal(validate({}, schema).valid, true);
+  assert.equal(validate({ billing: "none" }, schema).valid, false);
+  const r = validate({ billing: "invoice" }, schema);
+  assert.ok(r.errors.some((e) => e.keyword === "dependencies"));
+  assert.equal(validate({ billing: "invoice", taxNo: "91xx" }, schema).valid, true);
+});
+
+test("dependencies: schema 形式的字段依赖，错误带依赖标签", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      notify: { enum: ["sms", "email"] },
+      phone: { type: "string" },
+    },
+    dependencies: {
+      notify: {
+        type: "object",
+        if: { properties: { notify: { const: "sms" } }, required: ["notify"] },
+        then: { required: ["phone"], properties: { phone: { type: "string" } } },
+      },
+    },
+  };
+  assert.equal(validate({ notify: "sms", phone: "139" }, schema).valid, true);
+  const r = validate({ notify: "sms" }, schema);
+  assert.equal(r.valid, false);
+  assert.ok(
+    r.errors.some((e) => e.path === "/phone" && /依赖 "notify"/.test(e.message))
+  );
+  // notify=email 不触发 phone 必填
+  assert.equal(validate({ notify: "email" }, schema).valid, true);
+});

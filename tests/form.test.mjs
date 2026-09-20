@@ -198,3 +198,191 @@ test("数字输入：合法数字转 number，非法文本保留并报类型错"
   const result = form.submit();
   assert.ok(result.errors.some((e) => e.path === "/age" && e.keyword === "type"));
 });
+
+// ---------- allOf / dependencies / 数组对象默认值（新增） ----------
+
+const allOfSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["v"],
+  properties: { v: {} },
+  allOf: [
+    { required: ["a"], properties: { a: { type: "string", title: "A" } } },
+    { required: ["b"], properties: { b: { type: "integer", title: "B" } } },
+  ],
+};
+
+test("allOf：多支字段合并到同一个对象里一起渲染", () => {
+  const root = FakeDocument.createElement("div");
+  const form = new SchemaForm(root, allOfSchema);
+  form.setJSON({ v: 1, a: "x", b: 2 });
+  const paths = new Set(
+    findAll(root, "input").map((e) => e.attributes["data-path"]).filter(Boolean)
+  );
+  assert.ok(paths.has("/v"));
+  assert.ok(paths.has("/a"));
+  assert.ok(paths.has("/b"));
+  // 每个字段只渲染一次
+  assert.equal(
+    findAll(root, "input").filter((e) => e.attributes["data-path"] === "/a").length,
+    1
+  );
+  const submit = form.submit();
+  assert.equal(submit.valid, true);
+  // 输出 JSON 再用同一份 schema 校验必须过
+  assert.equal(validate(JSON.parse(form.toJSONString()), allOfSchema).valid, true);
+});
+
+test("allOf 冲突：提交失败且错误指出是哪一支", () => {
+  const schema = {
+    type: "object",
+    properties: { v: {} },
+    allOf: [
+      { properties: { v: { type: "string" } } },
+      { properties: { v: { type: "integer" } } },
+    ],
+  };
+  const root = FakeDocument.createElement("div");
+  const form = new SchemaForm(root, schema);
+  form.setJSON({ v: 5 });
+  const result = form.submit();
+  assert.equal(result.valid, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.path === "/v" && /allOf 第 1 支/.test(e.message)
+    ),
+    "应指出第 1 支（要求字符串）失败"
+  );
+});
+
+test("字段依赖：枚举触发后另一组出现；隐藏后脏值不带出去", () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      notify: { enum: ["sms", "email"], title: "通知方式" },
+    },
+    dependencies: {
+      notify: {
+        type: "object",
+        if: { properties: { notify: { const: "sms" } }, required: ["notify"] },
+        then: {
+          required: ["phone"],
+          properties: { phone: { type: "string", title: "手机号" } },
+        },
+      },
+    },
+  };
+  const root = FakeDocument.createElement("div");
+  const form = new SchemaForm(root, schema);
+
+  form.setJSON({ notify: "sms", phone: "13900000000" });
+  let paths = new Set(
+    findAll(root, "input").map((e) => e.attributes["data-path"]).filter(Boolean)
+  );
+  assert.ok(paths.has("/phone"), "触发后依赖组字段应出现");
+  assert.equal(form.submit().valid, true);
+
+  // 用户改成 email：sms 的 phone 组隐藏，值必须被清掉
+  form.setAt(["notify"], "email");
+  form._refresh(true);
+  paths = new Set(
+    findAll(root, "input").map((e) => e.attributes["data-path"]).filter(Boolean)
+  );
+  assert.ok(!paths.has("/phone"), "依赖组隐藏后不应再渲染");
+  const out = JSON.parse(form.toJSONString());
+  assert.deepEqual(out, { notify: "email" }, "隐藏字段的脏值不能带进输出");
+  assert.equal(validate(out, schema).valid, true);
+
+  // 切回 sms：phone 也不会带着旧值回来
+  form.setAt(["notify"], "sms");
+  form._refresh(true);
+  assert.equal(form.getAt(["phone"]), undefined);
+});
+
+test("数组 object 行：新增行带 schema 默认值；删中间行后错误路径跟随", () => {
+  const schema = {
+    type: "object",
+    required: ["items"],
+    properties: {
+      items: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["kind", "value"],
+          properties: {
+            kind: { enum: ["email", "phone"], title: "类型" },
+            value: { type: "string", minLength: 4, title: "内容" },
+            primary: { type: "boolean", default: true, title: "主要" },
+            channel: { type: "string", default: "web", title: "渠道" },
+          },
+        },
+      },
+    },
+  };
+  const root = FakeDocument.createElement("div");
+  const form = new SchemaForm(root, schema);
+  form.setJSON({
+    items: [
+      { kind: "email", value: "a@b.com" },
+      { kind: "phone", value: "bad" }, // minLength 会挂错在 /items/1/value
+      { kind: "email", value: "c@d.com" },
+    ],
+  });
+
+  let result = form.submit();
+  assert.ok(result.errors.some((e) => e.path === "/items/1/value"));
+
+  // 点第二行的删除按钮（删中间行）
+  const delButtons = findAll(root, "button").filter((b) => b._innerHTML === "" && /删除/.test(b.textContent));
+  assert.equal(delButtons.length, 3);
+  delButtons[1].dispatch("click");
+
+  assert.deepEqual(form.getAt(["items"]).map((r) => r.value), ["a@b.com", "c@d.com"]);
+
+  // 原第三行现在是第二行；让它的 value 非法，错误应挂在新的下标
+  form.setAt(["items", 1, "value"], "x");
+  result = form.submit();
+  assert.ok(
+    result.errors.some((e) => e.path === "/items/1/value"),
+    "删中间行后错误路径要跟着重排"
+  );
+  assert.ok(
+    !result.errors.some((e) => e.path.startsWith("/items/2")),
+    "不应残留已删除行下标 2 的路径"
+  );
+
+  // 新增一行：带上 schema 声明的默认值（boolean/string），不臆造空串 0
+  const addBtn = findAll(root, "button").find((b) => /添加一行/.test(b.textContent));
+  addBtn.dispatch("click");
+  const rows = form.getAt(["items"]);
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows[2], { primary: true, channel: "web" });
+});
+
+test("allOf 与旧的 oneOf 共存，oneOf 选支仍然工作", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      name: { type: "string" },
+      payment: {
+        oneOf: [
+          { title: "card", type: "object", required: ["cardNo"], properties: { cardNo: { type: "string", minLength: 4 } } },
+          { title: "balance", type: "object", required: ["balance"], properties: { balance: { type: "number", minimum: 0 } } },
+        ],
+      },
+    },
+    allOf: [{ properties: { remark: { type: "string", title: "备注" } } }],
+  };
+  const root = FakeDocument.createElement("div");
+  const form = new SchemaForm(root, schema);
+  form.setJSON({ name: "x", remark: "r", payment: { cardNo: "1234" } });
+  assert.equal(form.branches.get("/payment"), 0);
+  const paths = new Set(
+    findAll(root, "input").map((e) => e.attributes["data-path"]).filter(Boolean)
+  );
+  assert.ok(paths.has("/remark"), "allOf 合并字段在");
+  assert.ok(paths.has("/payment/cardNo"), "oneOf 选中支的字段在");
+  assert.equal(form.submit().valid, true);
+});

@@ -27,6 +27,30 @@ function defaultFor(s) {
 }
 
 /**
+ * Build a default row value for an object schema, honoring each
+ * property's own `default` keyword. Unlike defaultFor() this never
+ * invents implicit values (""/0/false): array rows must only carry what
+ * the schema actually declares.
+ */
+function schemaDefaultValue(s, deref) {
+  const ss = deref(s);
+  if (!ss || typeof ss !== "object") return undefined;
+  if (Object.prototype.hasOwnProperty.call(ss, "default")) {
+    return JSON.parse(JSON.stringify(ss.default));
+  }
+  if (ss.type === "object" || ss.properties) {
+    const out = {};
+    for (const key of Object.keys(ss.properties || {})) {
+      const d = schemaDefaultValue(ss.properties[key], deref);
+      if (d !== undefined) out[key] = d;
+    }
+    return out;
+  }
+  if (ss.type === "array") return [];
+  return undefined;
+}
+
+/**
  * Schema-driven form.
  *
  * Data model:
@@ -97,6 +121,9 @@ class SchemaForm {
 
   submit() {
     this.touched = true;
+    // Hidden conditional/dependency fields must not leak dirty values.
+    this._pruneHidden();
+    this._render();
     const result = this._validateWithBranches();
     this._applyErrors(result.errors);
     return { valid: result.valid, errors: result.errors, data: this.data };
@@ -109,6 +136,7 @@ class SchemaForm {
     this.stash = new Map();
     this.touched = false;
     this._inferBranches(this.schema, []);
+    this._pruneHidden();
     this._render();
     this.onChange(this.data);
   }
@@ -141,10 +169,8 @@ class SchemaForm {
     if (value && typeof value === "object" && !Array.isArray(value)) {
       const out = {};
       const propSchemas = { ...(s.properties || {}) };
-      if (s.if) {
-        const condValid = SF.validate(value, s.if, this.registry).valid;
-        const active = this.deref(condValid ? s.then : s.else);
-        if (active && active.properties) Object.assign(propSchemas, active.properties);
+      for (const c of this._objectFacets(s, value, "active")) {
+        if (c.properties) Object.assign(propSchemas, c.properties);
       }
       for (const key of Object.keys(value)) {
         const childSchema = propSchemas[key] || {};
@@ -170,17 +196,25 @@ class SchemaForm {
         .map((b, i) => ({ i, ok: SF.validate(value, b, this.registry).valid }))
         .filter((x) => x.ok);
       const p = SF.buildPointer(segments);
-      if (matches.length === 1 && !this.branches.has(p)) this.branches.set(p, matches[0].i);
-    }
-    if (s.type === "object" && s.properties) {
-      for (const k of Object.keys(s.properties)) {
-        this._inferBranches(s.properties[k], [...segments, k]);
+      if (matches.length === 1 && !this.branches.has(p)) {
+        this.branches.set(p, matches[0].i);
+        this._inferBranches(s.oneOf[matches[0].i], segments);
       }
+      return; // only the picked branch can describe the value
     }
-    if (s.type === "object" && s.if) {
-      const cond = SF.validate(this.getAt(segments), s.if, this.registry);
-      const active = cond.valid ? s.then : s.else;
-      if (active) this._inferBranches(active, segments);
+    if (s.type === "object" || s.properties) {
+      const value = this.getAt(segments);
+      // Own props + active facets (allOf, dependencies, if/then/else).
+      const contributors = [s, ...this._objectFacets(s, value, "active")];
+      const seen = new Set();
+      for (const c of contributors) {
+        if (!c.properties) continue;
+        for (const k of Object.keys(c.properties)) {
+          if (seen.has(k)) continue;
+          seen.add(k);
+          this._inferBranches(c.properties[k], [...segments, k]);
+        }
+      }
     }
     if (s.type === "array" && s.items && !Array.isArray(s.items)) {
       const arr = this.getAt(segments);
@@ -221,27 +255,25 @@ class SchemaForm {
         s = this.deref(s);
       }
 
-      if (s.type === "object") {
-        if (s.properties && key in s.properties) {
-          s = s.properties[key];
-        } else {
-          // maybe it comes from an active then/else branch
-          if (s.if) {
-            const condValid = SF.validate(this.getAt(walked), s.if, this.registry).valid;
-            const active = this.deref(condValid ? s.then : s.else);
-            if (active && active.properties && key in active.properties) {
-              s = active.properties[key];
-            } else {
-              return this.deref(s);
-            }
-          } else {
-            return this.deref(s);
-          }
-        }
-      } else if (s.type === "array" && s.items && !Array.isArray(s.items)) {
+      if (s.type === "array" && s.items && !Array.isArray(s.items)) {
         s = s.items;
-      } else {
+      } else if (s.type === "array") {
         return this.deref(s);
+      }
+
+      const own = s.properties && s.properties[key];
+      if (own) {
+        s = own;
+      } else {
+        // Field contributed by an active facet: allOf branch, schema
+        // dependency, or the picked if/then/else side.
+        const facets = this._objectFacets(s, this.getAt(walked), "active");
+        let found = null;
+        for (const f of facets) {
+          if (f.properties && key in f.properties) { found = f.properties[key]; break; }
+        }
+        if (!found) return this.deref(s);
+        s = found;
       }
       walked = walked.concat(key);
     }
@@ -275,9 +307,12 @@ class SchemaForm {
   }
 
   _refresh(rebuildNeeded) {
-    if (rebuildNeeded) {
-      this._render();
-    }
+    // Facets (if/then, allOf, dependencies) appear/disappear as values
+    // change, so the tree is rebuilt on every commit. Focus/caret is
+    // preserved across the rebuild inside _render(); IME composition
+    // never reaches here (composition events short-circuit earlier).
+    this._pruneHidden();
+    this._render();
     const result = this._validateWithBranches();
     this.lastErrors = result.errors;
     this._applyErrors(result.errors);
@@ -343,21 +378,31 @@ class SchemaForm {
     const body = el("div", { class: "sf-group-body" });
     group.appendChild(body);
 
+    // Own properties render first and directly in the body.
+    const renderedKeys = new Set();
     if (s.properties) {
       for (const key of Object.keys(s.properties)) {
         this._renderNode(s.properties[key], [...segments, key], body, key, false);
+        renderedKeys.add(key);
       }
     }
 
-    // if/then/else: exactly one side is rendered, based on the CURRENT value.
-    if (s.if) {
-      const condValid = SF.validate(value, s.if, this.registry).valid;
-      const activeSchema = condValid ? s.then : s.else;
-      if (activeSchema) {
-        const subWrap = el("div", { class: "sf-conditional" });
-        this._renderConditional(activeSchema, segments, subWrap);
-        body.appendChild(subWrap);
+    // Then the active facets: allOf branches (ALL of them, merged flat),
+    // schema dependencies whose trigger is present, and the picked
+    // if/then/else side. Each top-level source gets a labeled wrapper.
+    for (const src of this._facetSources(s, value)) {
+      const wrapClass =
+        "sf-conditional sf-facet" +
+        (src.kind === "allOf" ? " sf-facet-allof" : src.kind === "dependencies" ? " sf-facet-dep" : "");
+      const wrap = el("div", { class: wrapClass });
+      if (src.label) {
+        const tag = el("span", { class: "sf-facet-title" });
+        tag.textContent = src.label;
+        wrap.appendChild(tag);
       }
+      this._renderFacetNode(src.schema, segments, wrap, renderedKeys);
+      // Wrappers stay only if they actually contributed a control.
+      if (wrap.children.length > (src.label ? 1 : 0)) body.appendChild(wrap);
     }
 
     const errAt = el("div", { class: "sf-errors sf-group-errors" });
@@ -368,29 +413,181 @@ class SchemaForm {
   }
 
   /**
-   * then/else constrain the SAME object instance: render their properties
-   * flat alongside the object's own fields.
+   * Render one facet source: its own properties flat plus any nested
+   * active facets (nested if/then, allOf inside an allOf branch, ...).
+   * `renderedKeys` is the object-wide dedupe set so a field merged in by
+   * several branches renders exactly once (first occurrence wins).
    */
-  _renderConditional(schema, segments, container) {
+  _renderFacetNode(schema, segments, container, renderedKeys) {
     const s = this.deref(schema);
     if (!s) return;
     if (Array.isArray(s.oneOf)) return this._renderOneOf(s, segments, container, "");
-    // A branch schema is object-shaped whenever it carries properties (or a
-    // nested conditional); draft-07 does not require an explicit "type".
-    if (s.properties || s.if) {
-      if (s.properties) {
-        for (const key of Object.keys(s.properties)) {
-          this._renderNode(s.properties[key], [...segments, key], container, key, false);
+
+    if (s.properties) {
+      for (const key of Object.keys(s.properties)) {
+        if (renderedKeys.has(key)) continue;
+        renderedKeys.add(key);
+        this._renderNode(s.properties[key], [...segments, key], container, key, false);
+      }
+    }
+    // Nested facets inherit the parent source's wrapper/label.
+    for (const child of this._facetSources(s, this.getAt(segments))) {
+      this._renderFacetNode(child.schema, segments, container, renderedKeys);
+    }
+  }
+
+  /**
+   * Active contributing object-schemas of `s` for the given value,
+   * flattened in stable order: if/then side, allOf branches, then
+   * triggered schema dependencies. `mode`:
+   *   "active" - only currently contributing facets
+   *   "all"    - every facet regardless of the current value (used to
+   *              know which keys are "managed" and safe to prune)
+   */
+  _objectFacets(schema, value, mode) {
+    const out = [];
+    const seen = new Set();
+    const isObj = value !== null && typeof value === "object" && !Array.isArray(value);
+    const visitActive = (node, depth) => {
+      const n = this.deref(node);
+      if (!n || typeof n !== "object" || seen.has(n) || depth > 64) return;
+      seen.add(n);
+      if (n.if) {
+        const condValid = SF.validate(value, n.if, this.registry).valid;
+        const side = condValid ? n.then : n.else;
+        if (side) visitActive(side, depth + 1);
+      }
+      if (Array.isArray(n.allOf)) n.allOf.forEach((b) => visitActive(b, depth + 1));
+      if (isObj && n.dependencies) {
+        for (const trigger of Object.keys(n.dependencies)) {
+          const dep = n.dependencies[trigger];
+          if (dep && typeof dep === "object" && !Array.isArray(dep) && trigger in value) {
+            visitActive(dep, depth + 1);
+          }
         }
       }
-      if (s.if) {
-        const value = this.getAt(segments);
-        const condValid = SF.validate(value, s.if, this.registry).valid;
-        const active = condValid ? s.then : s.else;
-        if (active) this._renderConditional(active, segments, container);
+      if (n !== this.deref(schema)) out.push(n);
+    };
+    const visitAll = (node, depth) => {
+      const n = this.deref(node);
+      if (!n || typeof n !== "object" || seen.has(n) || depth > 64) return;
+      seen.add(n);
+      if (n.if) { visitAll(n.then, depth + 1); visitAll(n.else, depth + 1); }
+      if (Array.isArray(n.allOf)) n.allOf.forEach((b) => visitAll(b, depth + 1));
+      if (n.dependencies) {
+        for (const trigger of Object.keys(n.dependencies)) {
+          const dep = n.dependencies[trigger];
+          if (dep && typeof dep === "object" && !Array.isArray(dep)) visitAll(dep, depth + 1);
+        }
       }
-    } else {
-      this._renderNode(s, segments, container, "", false);
+      if (n !== this.deref(schema)) out.push(n);
+    };
+    if (mode === "all") visitAll(schema, 0);
+    else visitActive(schema, 0);
+    return out;
+  }
+
+  /** Top-level facet sources with labels, for grouped rendering. */
+  _facetSources(schema, value) {
+    const s = this.deref(schema);
+    const sources = [];
+    const isObj = value !== null && typeof value === "object" && !Array.isArray(value);
+    if (s.if) {
+      const condValid = SF.validate(value, s.if, this.registry).valid;
+      const side = condValid ? s.then : s.else;
+      if (side) sources.push({ schema: side, label: "", kind: "if" });
+    }
+    if (Array.isArray(s.allOf)) {
+      s.allOf.forEach((b, i) => {
+        sources.push({
+          schema: b,
+          label: `allOf 第 ${i + 1} 支`,
+          kind: "allOf",
+        });
+      });
+    }
+    if (isObj && s.dependencies) {
+      Object.keys(s.dependencies).forEach((trigger, i) => {
+        if (!(trigger in value)) return;
+        const dep = s.dependencies[trigger];
+        if (dep && typeof dep === "object" && !Array.isArray(dep)) {
+          sources.push({
+            schema: dep,
+            label: `依赖 "${trigger}"`,
+            kind: "dependencies",
+          });
+        }
+      });
+    }
+    return sources;
+  }
+
+  /**
+   * Remove values belonging to facets that are currently inactive:
+   * hidden if/else sides, untriggered schema dependencies, keys not
+   * carried by the picked oneOf branch. Runs to a fixpoint because
+   * deleting a trigger key may deactivate a nested facet in turn.
+   * Data the schema says nothing about is left untouched.
+   */
+  _pruneHidden() {
+    const prune = (segments, schema) => {
+      const s = this.deref(schema);
+      if (!s || typeof s !== "object") return;
+      const value = this.getAt(segments);
+
+      if (Array.isArray(s.oneOf)) {
+        const p = SF.buildPointer(segments);
+        const idx = this.branches.get(p);
+        if (idx != null && s.oneOf[idx]) {
+          prune(segments, s.oneOf[idx]);
+        }
+        return; // unselected sibling branches own none of the value
+      }
+
+      if (Array.isArray(value)) {
+        if (s.items && !Array.isArray(s.items)) {
+          value.forEach((_, i) => prune([...segments, i], s.items));
+        }
+        return;
+      }
+
+      if (value === null || typeof value !== "object") return;
+
+      const active = this._objectFacets(s, value, "active");
+      const all = this._objectFacets(s, value, "all");
+      const activeKeys = new Set();
+      const allKeys = new Set();
+      const activeSchemaForKey = new Map();
+      for (const f of active) {
+        for (const k of Object.keys(f.properties || {})) {
+          activeKeys.add(k);
+          if (!activeSchemaForKey.has(k)) activeSchemaForKey.set(k, f.properties[k]);
+        }
+      }
+      for (const f of all) {
+        for (const k of Object.keys(f.properties || {})) allKeys.add(k);
+      }
+
+      let changed = false;
+      for (const key of Object.keys(value)) {
+        if (s.properties && key in s.properties) {
+          prune([...segments, key], s.properties[key]);
+        } else if (activeKeys.has(key)) {
+          prune([...segments, key], activeSchemaForKey.get(key));
+        } else if (allKeys.has(key)) {
+          // Managed by some facet that is currently inactive: drop it.
+          delete value[key];
+          changed = true;
+        }
+        // Key managed by nobody: preserved (handled by
+        // additionalProperties at validation time instead).
+      }
+      return changed;
+    };
+
+    if (this.data === undefined) return;
+    for (let i = 0; i < 8; i++) {
+      if (prune([], this.schema) !== true) break;
     }
   }
 
@@ -436,8 +633,15 @@ class SchemaForm {
     add.addEventListener("click", () => {
       const cur = this.getAt(segments) || [];
       const itemSchema = this.deref(s.items || {});
-      cur.push(defaultFor(itemSchema));
+      // Object rows carry each property's declared `default`; primitives
+      // still use the control-level empty convention (enum[0], "", 0...).
+      let row = schemaDefaultValue(itemSchema, (x) => this.deref(x));
+      if (row === undefined) row = defaultFor(itemSchema);
+      cur.push(row);
       this.setAt(segments, cur);
+      const rowSegs = [...segments, cur.length - 1];
+      this._inferBranches(itemSchema, rowSegs);
+      this._pruneHidden();
       this._refresh(true);
     });
 
