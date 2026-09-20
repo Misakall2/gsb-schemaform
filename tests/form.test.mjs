@@ -333,3 +333,124 @@ test("allOf：多支字段平铺渲染，且一起校验", () => {
   assert.equal(r.valid, false);
   assert.ok(r.errors.some((e) => e.path === "/b" && /allOf 第 1 支/.test(e.message)));
 });
+
+test("oneOf：显式选择的支之外，其他支旧字段不会进入提交结果", () => {
+  const branchSchema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      payment: {
+        oneOf: [
+          {
+            type: "object",
+            additionalProperties: false,
+            required: ["cardNo"],
+            properties: { cardNo: { type: "string", minLength: 4 } },
+          },
+          {
+            type: "object",
+            additionalProperties: false,
+            required: ["balance"],
+            properties: { balance: { type: "number", minimum: 0 } },
+          },
+        ],
+      },
+    },
+  };
+  const root = FakeDocument.createElement("div");
+  const f = new SchemaForm(root, branchSchema);
+  f.setJSON({ payment: { cardNo: "1234", balance: 10 } });
+  f.branches.set("/payment", 0);
+  f._render();
+
+  const result = f.submit();
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.data, { payment: { cardNo: "1234" } });
+  assert.equal("balance" in result.data.payment, false);
+});
+
+test("if/then/else：文本条件字段中文组字结束后只切换一次布局", () => {
+  const branchSchema = {
+    type: "object",
+    properties: {
+      kind: { type: "string" },
+      emailValue: { type: "string" },
+      phoneValue: { type: "string" },
+    },
+    if: { properties: { kind: { const: "email" } }, required: ["kind"] },
+    then: { properties: { emailExtra: { type: "boolean" } } },
+    else: { properties: { phoneExtra: { type: "boolean" } } },
+  };
+  const root = FakeDocument.createElement("div");
+  const f = new SchemaForm(root, branchSchema);
+  f.setJSON({});
+  f.touched = true;
+  const kindInput = findByPath(root, "/kind")[0];
+  let changeCount = 0;
+  f.onChange = () => { changeCount += 1; };
+
+  kindInput.dispatch("compositionstart");
+  kindInput.value = "e";
+  kindInput.dispatch("input");
+  assert.equal(changeCount, 0);
+  assert.equal(findByPath(root, "/emailExtra").length, 0);
+
+  kindInput.value = "email";
+  kindInput.dispatch("compositionend");
+  kindInput.dispatch("input");
+  assert.equal(changeCount, 1);
+  assert.deepEqual(JSON.parse(f.toJSONString()), { kind: "email" });
+  assert.equal(findByPath(root, "/emailExtra").length, 1);
+  assert.equal(findByPath(root, "/phoneExtra").length, 0);
+});
+
+test("$ref：definitions 中声明的 required 同时驱动校验和必填标识", () => {
+  const branchSchema = {
+    type: "object",
+    properties: { address: { $ref: "#/definitions/address" } },
+    definitions: {
+      address: {
+        type: "object",
+        additionalProperties: false,
+        required: ["zip"],
+        properties: { zip: { type: "string", minLength: 6 } },
+      },
+    },
+  };
+  const root = FakeDocument.createElement("div");
+  const f = new SchemaForm(root, branchSchema);
+  f.setJSON({ address: {} });
+  assert.equal(f._isRequired(["address", "zip"]), true);
+  const result = f.submit();
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some((e) => e.path === "/address/zip" && e.keyword === "required"));
+});
+
+test("数组：删除第 0 行后立即提交，错误落在新的第 0 行", () => {
+  const branchSchema = {
+    type: "object",
+    properties: {
+      groups: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["v"],
+          properties: { v: { type: "integer" } },
+        },
+      },
+    },
+  };
+  const root = FakeDocument.createElement("div");
+  const f = new SchemaForm(root, branchSchema);
+  f.setJSON({ groups: [{ v: 1 }, { v: "bad" }, { v: 3 }] });
+  assert.equal(f.submit().valid, false);
+
+  findAll(root, "button")
+    .filter((b) => b.textContent.includes("删除"))[0]
+    .dispatch("click");
+
+  const result = f.submit();
+  assert.deepEqual(result.data, { groups: [{ v: "bad" }, { v: 3 }] });
+  assert.ok(result.errors.some((e) => e.path === "/groups/0/v"));
+  assert.equal(result.errors.some((e) => e.path === "/groups/1/v"), false);
+});

@@ -317,6 +317,11 @@ class SchemaForm {
     if (Array.isArray(s.oneOf)) {
       const idx = this.branches.get(SF.buildPointer(segments));
       if (idx !== undefined && s.oneOf[idx]) {
+        s.oneOf.forEach((branch, i) => {
+          if (i !== idx) {
+            this._pruneAlternative(s.oneOf[idx], branch, value, segments);
+          }
+        });
         this._pruneData(s.oneOf[idx], value, segments);
       }
       return;
@@ -341,20 +346,60 @@ class SchemaForm {
     }
   }
 
+  /**
+   * Remove values owned by an unselected oneOf branch. Keys shared by the
+   * selected branch are reconciled recursively instead of being deleted.
+   */
+  _pruneAlternative(selectedSchema, alternativeSchema, value, segments) {
+    const selected = this.deref(selectedSchema);
+    const alternative = this.deref(alternativeSchema);
+    if (!selected || !alternative || value === null || typeof value !== "object" ||
+        Array.isArray(value)) return;
+
+    const selectedLayout = this._objectLayout(selected, value);
+    const selectedFields = new Map(selectedLayout.fields.map((f) => [f.key, f]));
+    const alternativeFields = this._objectLayout(alternative, value).fields;
+
+    for (const field of alternativeFields) {
+      if (!Object.prototype.hasOwnProperty.call(value, field.key)) continue;
+      const selectedField = selectedFields.get(field.key);
+      if (!selectedField || !selectedLayout.active.has(field.key)) {
+        delete value[field.key];
+      } else if (
+        value[field.key] &&
+        typeof value[field.key] === "object" &&
+        !Array.isArray(value[field.key])
+      ) {
+        this._pruneAlternative(
+          selectedField.schema,
+          field.schema,
+          value[field.key],
+          [...segments, field.key]
+        );
+      }
+    }
+  }
+
   _validateWithBranches() {
+    this._pruneData(this.schema, this.data, []);
     const result = SF.validate(this.data, this.schema, this.registry);
     const extra = [];
+    const explicitOneOf = new Set();
     for (const [pointer, branchIndex] of this.branches) {
       const segments = SF.parsePointer(pointer);
       const value = this.getAt(segments);
       const oneOfSchema = this._schemaAt(segments);
       const branch = oneOfSchema.oneOf[branchIndex];
+      if (!branch) continue;
+      explicitOneOf.add(pointer);
       const sub = SF.validate(value, branch, this.registry);
       if (!sub.valid) {
         extra.push({ path: pointer, keyword: "oneOf", message: "当前选择的类型与字段内容不符" });
       }
     }
-    const errors = result.errors.concat(extra);
+    const errors = result.errors
+      .filter((e) => !(e.keyword === "oneOf" && explicitOneOf.has(e.path)))
+      .concat(extra);
     return { valid: errors.length === 0, errors };
   }
 
@@ -593,6 +638,7 @@ class SchemaForm {
   _renderPrimitive(s, segments, container, labelText, value) {
     const pointer = SF.buildPointer(segments);
     const required = this._isRequired(segments);
+    const affectsLayout = this._isConditionField(segments);
     const label = s.title || labelText;
     let control;
 
@@ -635,21 +681,25 @@ class SchemaForm {
       // IME: while composing pinyin (compositionstart..end), do NOT validate,
       // so the field is not painted red letter by letter.
       let composing = false;
+      let imeJustEnded = false;
       control.addEventListener("compositionstart", () => { composing = true; });
       control.addEventListener("compositionend", () => {
         composing = false;
         this._commitText(s, segments, control.value);
-        this._refresh(false);
+        this._refresh(affectsLayout);
+        imeJustEnded = true;
+        queueMicrotask(() => { imeJustEnded = false; });
       });
-      control.addEventListener("input", () => {
-        if (composing) return;
+      control.addEventListener("input", (event) => {
+        if (imeJustEnded) return;
+        if (composing || event.isComposing) return;
         this._commitText(s, segments, control.value);
-        this._refresh(false);
+        this._refresh(affectsLayout);
       });
       control.addEventListener("blur", () => {
         if (composing) return;
         this._commitText(s, segments, control.value);
-        this._refresh(false);
+        this._refresh(affectsLayout);
       });
     }
 
@@ -664,6 +714,47 @@ class SchemaForm {
     wrap.appendChild(control);
     wrap.appendChild(this._errorSlot(segments));
     container.appendChild(wrap);
+  }
+
+  _isConditionField(segments) {
+    if (!segments.length) return false;
+    const parentSegments = segments.slice(0, -1);
+    const key = segments[segments.length - 1];
+    const parent = this._schemaAt(parentSegments);
+    return this._schemaConditionMentions(parent, key, this.getAt(parentSegments));
+  }
+
+  _schemaConditionMentions(schema, key, value, isActive = true) {
+    const s = this.deref(schema);
+    if (!s || typeof s !== "object") return false;
+
+    if (isActive && s.if) {
+      const condition = this.deref(s.if);
+      if (condition && condition.properties &&
+          Object.prototype.hasOwnProperty.call(condition.properties, key)) {
+        return true;
+      }
+    }
+
+    if (!isActive) return false;
+
+    let conditionOn = false;
+    if (s.if) conditionOn = SF.validate(value, s.if, this.registry).valid;
+    const branches = [
+      ...(s.if ? [s.if, [s.then, conditionOn], [s.else, !conditionOn]] : []),
+      ...(Array.isArray(s.allOf) ? s.allOf.map((branch) => [branch, true]) : []),
+    ];
+    if (s.dependencies && value && typeof value === "object" && !Array.isArray(value)) {
+      for (const [trigger, dep] of Object.entries(s.dependencies)) {
+        if (dep && typeof dep === "object" && !Array.isArray(dep)) {
+          branches.push([dep, Object.prototype.hasOwnProperty.call(value, trigger)]);
+        }
+      }
+    }
+    return branches.some((entry) => {
+      const [branch, branchActive = true] = Array.isArray(entry) ? entry : [entry, true];
+      return this._schemaConditionMentions(branch, key, value, branchActive);
+    });
   }
 
   _commitText(s, segments, raw) {
