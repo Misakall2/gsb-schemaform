@@ -305,10 +305,9 @@ class SchemaForm {
 
   /**
    * Remove values belonging to fields that the current layout hides
-   * (failed if/else side, inactive dependency group). Recurses through
-   * objects and arrays; descends into the picked oneOf branch.
-   * Keys from inactive branches that are also contributed by an active
-   * group are kept.
+   * (failed if/else side, inactive dependency group, or an unselected
+   * oneOf branch). Recurses through objects and arrays and descends into
+   * the picked oneOf branch.
    */
   _pruneData(schema, value, segments) {
     const s = this.deref(schema);
@@ -317,6 +316,21 @@ class SchemaForm {
     if (Array.isArray(s.oneOf)) {
       const idx = this.branches.get(SF.buildPointer(segments));
       if (idx !== undefined && s.oneOf[idx]) {
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          const ownedBySelected = new Set();
+          const ownedByAny = new Set();
+          s.oneOf.forEach((branch, branchIndex) => {
+            const keys = new Set();
+            this._collectOwnedKeys(branch, keys);
+            for (const key of keys) {
+              ownedByAny.add(key);
+              if (branchIndex === idx) ownedBySelected.add(key);
+            }
+          });
+          for (const key of Object.keys(value)) {
+            if (ownedByAny.has(key) && !ownedBySelected.has(key)) delete value[key];
+          }
+        }
         this._pruneData(s.oneOf[idx], value, segments);
       }
       return;
@@ -341,6 +355,25 @@ class SchemaForm {
     }
   }
 
+  /**
+   * Property keys that a schema can render in any of its conditional,
+   * dependency, allOf, or nested oneOf branches.
+   */
+  _collectOwnedKeys(schema, out) {
+    const s = this.deref(schema);
+    if (!s || typeof s !== "object") return;
+    if (s.properties) Object.keys(s.properties).forEach((key) => out.add(key));
+    if (Array.isArray(s.allOf)) s.allOf.forEach((branch) => this._collectOwnedKeys(branch, out));
+    if (Array.isArray(s.oneOf)) s.oneOf.forEach((branch) => this._collectOwnedKeys(branch, out));
+    if (s.then) this._collectOwnedKeys(s.then, out);
+    if (s.else) this._collectOwnedKeys(s.else, out);
+    if (s.dependencies) {
+      for (const dep of Object.values(s.dependencies)) {
+        if (dep && typeof dep === "object" && !Array.isArray(dep)) this._collectOwnedKeys(dep, out);
+      }
+    }
+  }
+
   _validateWithBranches() {
     const result = SF.validate(this.data, this.schema, this.registry);
     const extra = [];
@@ -351,6 +384,12 @@ class SchemaForm {
       const branch = oneOfSchema.oneOf[branchIndex];
       const sub = SF.validate(value, branch, this.registry);
       if (!sub.valid) {
+        for (const e of sub.errors) {
+          extra.push({
+            ...e,
+            path: pointer + e.path,
+          });
+        }
         extra.push({ path: pointer, keyword: "oneOf", message: "当前选择的类型与字段内容不符" });
       }
     }
@@ -636,18 +675,19 @@ class SchemaForm {
       // so the field is not painted red letter by letter.
       let composing = false;
       control.addEventListener("compositionstart", () => { composing = true; });
-      control.addEventListener("compositionend", () => {
+      control.addEventListener("compositionend", (event) => {
+        if (event && event.isComposing) return;
         composing = false;
         this._commitText(s, segments, control.value);
-        this._refresh(false);
+        this._refresh(true);
       });
-      control.addEventListener("input", () => {
-        if (composing) return;
+      control.addEventListener("input", (event) => {
+        if (composing || (event && event.isComposing)) return;
         this._commitText(s, segments, control.value);
         this._refresh(false);
       });
-      control.addEventListener("blur", () => {
-        if (composing) return;
+      control.addEventListener("blur", (event) => {
+        if (composing || (event && event.isComposing)) return;
         this._commitText(s, segments, control.value);
         this._refresh(false);
       });

@@ -119,6 +119,41 @@ test("oneOf：显式选了支但内容不符合该支 -> 提交失败", () => {
   assert.ok(result.errors.some((e) => e.path === "/payment" && e.message.includes("类型")));
 });
 
+test("oneOf：显式选择的支之外，其他支的残留字段不进入提交", () => {
+  const strictUnion = {
+    type: "object",
+    properties: {
+      payment: {
+        oneOf: [
+          {
+            title: "card",
+            type: "object",
+            additionalProperties: false,
+            required: ["cardNo"],
+            properties: { cardNo: { type: "string", minLength: 4 } },
+          },
+          {
+            title: "balance",
+            type: "object",
+            additionalProperties: false,
+            required: ["balance"],
+            properties: { balance: { type: "number", minimum: 0 } },
+          },
+        ],
+      },
+    },
+  };
+  const root = FakeDocument.createElement("div");
+  const f = new SchemaForm(root, strictUnion);
+  f.setJSON({ payment: { cardNo: "1234", balance: 10 } });
+  f.branches.set("/payment", 0);
+  f._render();
+
+  const result = f.submit();
+  assert.deepEqual(result.data, { payment: { cardNo: "1234" } });
+  assert.equal(result.valid, true);
+});
+
 test("if/then/else：email 行渲染 primary，phone 行渲染 sms，不同时出现", () => {
   const { form, root } = mount();
   form.setJSON({
@@ -162,6 +197,32 @@ test("IME 组字期间不校验，compositionend 后才提交一次值", () => {
   nameInput.dispatch("compositionend");
   assert.equal(changeCount, 1);
   assert.equal(form.getAt(["name"]), "张");
+});
+
+test("IME：浏览器只给 isComposing 时，条件布局也只在组字结束后切换", () => {
+  const schema = {
+    type: "object",
+    properties: { kind: { type: "string" } },
+    if: { properties: { kind: { const: "email" } }, required: ["kind"] },
+    then: { properties: { email: { type: "string" } } },
+    else: { properties: { phone: { type: "string" } } },
+  };
+  const root = FakeDocument.createElement("div");
+  const f = new SchemaForm(root, schema);
+  f.setJSON({ kind: "x" });
+  const kind = findByPath(root, "/kind")[0];
+
+  kind.value = "e";
+  kind.dispatch("input", { isComposing: true });
+  assert.equal(findByPath(root, "/email").length, 0);
+  assert.ok(findByPath(root, "/phone").length > 0);
+  assert.deepEqual(JSON.parse(f.toJSONString()), { kind: "x" });
+
+  kind.value = "email";
+  kind.dispatch("compositionend", { isComposing: false });
+  assert.ok(findByPath(root, "/email").length > 0);
+  assert.equal(findByPath(root, "/phone").length, 0);
+  assert.deepEqual(JSON.parse(f.toJSONString()), { kind: "email" });
 });
 
 test("数组：添加/删除行后数据与路径重排", () => {
@@ -251,6 +312,62 @@ test("if/then：隐藏分支的旧值在切换枚举后也被清掉（旧能力�
   assert.equal(findByPath(root, "/sms").length, 0);
 });
 
+test("additionalProperties:false：切走条件分支后，隐藏旧键被剥掉且提交通过", () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: { kind: { enum: ["email", "phone"] } },
+    if: { properties: { kind: { const: "email" } }, required: ["kind"] },
+    then: { properties: { email: { type: "string" } } },
+    else: { properties: { phone: { type: "string" } } },
+  };
+  const root = FakeDocument.createElement("div");
+  const f = new SchemaForm(root, schema);
+  f.setJSON({ kind: "email", email: "a@b.com" });
+  const sel = findByPath(root, "/kind")[0];
+  sel.value = "phone";
+  sel.dispatch("change");
+
+  assert.deepEqual(JSON.parse(f.toJSONString()), { kind: "phone" });
+  assert.equal(f.submit().valid, true);
+});
+
+test("$ref：oneOf 支指向 definitions 时，定义里的 required 仍然生效", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      payment: {
+        oneOf: [
+          { $ref: "#/definitions/card" },
+          { $ref: "#/definitions/balance" },
+        ],
+      },
+    },
+    definitions: {
+      card: {
+        type: "object",
+        additionalProperties: false,
+        required: ["cardNo"],
+        properties: { cardNo: { type: "string" } },
+      },
+      balance: {
+        type: "object",
+        additionalProperties: false,
+        required: ["balance"],
+        properties: { balance: { type: "number" } },
+      },
+    },
+  };
+  const root = FakeDocument.createElement("div");
+  const f = new SchemaForm(root, schema);
+  f.setJSON({ payment: {} });
+  f.branches.set("/payment", 0);
+  f._render();
+  const result = f.submit();
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some((e) => e.path === "/payment/cardNo" && e.keyword === "required"));
+});
+
 test("数组 object 新增行携带 schema 默认值（含嵌套）", () => {
   const schema = {
     type: "object",
@@ -308,6 +425,45 @@ test("数组：删除中间行后，错误下标路径跟着迁移", () => {
   r = f.submit();
   assert.ok(r.errors.some((e) => e.path === "/items/0/v"), "错误应迁移到 /items/0/v");
   assert.equal(r.errors.some((e) => e.path === "/items/1/v"), false);
+});
+
+test("数组：删除第 0 行后，嵌套行内错误路径同步前移", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      groups: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            items: {
+              type: "array",
+              items: {
+                type: "object",
+                required: ["v"],
+                properties: { v: { type: "integer" } },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+  const root = FakeDocument.createElement("div");
+  const f = new SchemaForm(root, schema);
+  f.setJSON({ groups: [{ items: [{ v: 1 }, { v: "bad" }, { v: 3 }] }] });
+  f.submit();
+
+  const nestedDelete = findAll(root, "button")
+    .filter((b) => b.textContent.includes("删除"))[0];
+  nestedDelete.dispatch("click");
+
+  const result = f.submit();
+  assert.deepEqual(JSON.parse(f.toJSONString()), {
+    groups: [{ items: [{ v: "bad" }, { v: 3 }] }],
+  });
+  assert.ok(result.errors.some((e) => e.path === "/groups/0/items/0/v"));
+  assert.equal(result.errors.some((e) => e.path === "/groups/0/items/1/v"), false);
 });
 
 test("allOf：多支字段平铺渲染，且一起校验", () => {
