@@ -1,3 +1,5 @@
 # gsb-schemaform
 
-Python 3 stdlib only. `python3 -m unittest discover -s . -v`
+Vanilla HTML, CSS, JavaScript. No npm.
+
+Open the page locally. Validator tests: Node built-in test runner if present.
