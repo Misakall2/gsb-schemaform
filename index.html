@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JSON Schema 配置表单</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="layout">
+    <section class="panel panel-form">
+      <header class="panel-head">
+        <h1>配置表单</h1>
+        <div class="toolbar">
+          <button id="btn-load" type="button" class="btn">回填示例 JSON</button>
+          <button id="btn-reset" type="button" class="btn btn-ghost">清空</button>
+        </div>
+      </header>
+      <div id="form-mount"></div>
+      <div class="submit-bar">
+        <button id="btn-submit" type="button" class="btn btn-primary">生成 JSON</button>
+        <span id="submit-status" class="submit-status" aria-live="polite"></span>
+      </div>
+    </section>
+
+    <section class="panel panel-output">
+      <header class="panel-head">
+        <h1>输出 JSON</h1>
+        <div class="toolbar">
+          <button id="btn-copy" type="button" class="btn btn-ghost">复制</button>
+        </div>
+      </header>
+      <textarea id="json-output" class="json-output" spellcheck="false"
+        placeholder="表单数据会实时显示在这里…"></textarea>
+      <p class="hint">
+        输出的 JSON 会用同一份 schema 再次校验；路径形如
+        <code>/contacts/0/value</code> 的错误直接挂在对应控件下方。
+      </p>
+    </section>
+  </main>
+
+  <script src="./js/errors.js"></script>
+  <script src="./js/schema-core.js"></script>
+  <script src="./js/validator.js"></script>
+  <script src="./js/form.js"></script>
+  <script src="./demo-schema.js"></script>
+  <script>
+
+    const mount = document.getElementById("form-mount");
+    const output = document.getElementById("json-output");
+    const status = document.getElementById("submit-status");
+
+    const form = new SF.SchemaForm(mount, SF.demoSchema, {
+      onChange(data) {
+        output.value = data === undefined ? "" : JSON.stringify(data, null, 2);
+      },
+    });
+
+    output.value = form.toJSONString();
+
+    document.getElementById("btn-submit").addEventListener("click", () => {
+      const result = form.submit();
+      if (result.valid) {
+        status.textContent = "校验通过";
+        status.className = "submit-status ok";
+        output.value = JSON.stringify(result.data, null, 2);
+      } else {
+        status.textContent = `校验失败：${result.errors.length} 个错误`;
+        status.className = "submit-status bad";
+      }
+    });
+
+    document.getElementById("btn-load").addEventListener("click", () => {
+      form.setJSON(SF.demoData);
+      output.value = form.toJSONString();
+      status.textContent = "已回填示例数据";
+      status.className = "submit-status";
+    });
+
+    document.getElementById("btn-reset").addEventListener("click", () => {
+      form.setJSON(undefined);
+      output.value = "";
+      status.textContent = "";
+      status.className = "submit-status";
+    });
+
+    document.getElementById("btn-copy").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(output.value);
+        status.textContent = "已复制";
+        status.className = "submit-status";
+      } catch (_) {
+        output.select();
+        document.execCommand("copy");
+      }
+    });
+  </script>
+</body>
+</html>
