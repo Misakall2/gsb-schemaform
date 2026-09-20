@@ -1,0 +1,117 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "用户登记表",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "age", "contact"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 30,
+      "description": "姓名，1-30 个字符"
+    },
+    "age": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 150
+    },
+    "vip": {
+      "type": "boolean",
+      "description": "勾选后需要填写会员等级"
+    },
+    "level": {
+      "type": "string",
+      "enum": ["bronze", "silver", "gold"]
+    },
+    "contact": {
+      "oneOf": [
+        {
+          "title": "邮箱",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "email"],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["email"]
+            },
+            "email": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 100
+            }
+          }
+        },
+        {
+          "title": "电话",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "phone"],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["phone"]
+            },
+            "phone": { "$ref": "#/definitions/phone" }
+          }
+        }
+      ]
+    },
+    "address": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["country"],
+      "properties": {
+        "country": {
+          "type": "string",
+          "enum": ["CN", "US", "JP"]
+        },
+        "domestic": { "type": "boolean" }
+      },
+      "if": {
+        "properties": { "country": { "enum": ["CN"] } },
+        "required": ["country"]
+      },
+      "then": {
+        "required": ["province"],
+        "properties": {
+          "province": { "type": "string", "minLength": 2 },
+          "idCard": { "type": "boolean" }
+        }
+      },
+      "else": {
+        "required": ["postalCode"],
+        "properties": {
+          "postalCode": { "type": "string", "minLength": 3 }
+        }
+      }
+    },
+    "users": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["email"],
+        "properties": {
+          "email": {
+            "type": "string",
+            "minLength": 3
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "phone": {
+      "type": "string",
+      "minLength": 6,
+      "maxLength": 20
+    }
+  }
+}

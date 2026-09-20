@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JSON Schema 配置表单</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>JSON Schema 配置中心</h1>
+    <p class="subtitle">一份 schema 同时驱动出表与校验 · 原生 HTML / CSS / JS · 无第三方库</p>
+  </header>
+
+  <main class="layout">
+    <section class="panel form-panel">
+      <div class="panel-head">
+        <h2>表单</h2>
+        <div class="panel-actions">
+          <button id="btn-submit" class="btn btn-primary" type="button">校验并生成 JSON</button>
+          <button id="btn-reset" class="btn" type="button">清空</button>
+        </div>
+      </div>
+      <div id="form-root" class="form-root"></div>
+      <div id="form-status" class="form-status" role="status" aria-live="polite"></div>
+    </section>
+
+    <section class="panel output-panel">
+      <div class="panel-head">
+        <h2>输出 JSON</h2>
+        <div class="panel-actions">
+          <button id="btn-copy" class="btn" type="button">复制</button>
+        </div>
+      </div>
+      <pre id="json-output" class="json-output"></pre>
+
+      <div class="panel-head">
+        <h2>从 JSON 回填</h2>
+      </div>
+      <textarea id="json-input" class="json-input" spellcheck="false"
+        placeholder='粘贴与当前 schema 对应的 JSON，点"回填表单"'></textarea>
+      <div class="panel-actions">
+        <button id="btn-load" class="btn" type="button">回填表单</button>
+        <span id="load-status" class="load-status"></span>
+      </div>
+
+      <details class="schema-editor">
+        <summary>Schema（可修改后重建表单）</summary>
+        <textarea id="schema-input" class="json-input schema-text" spellcheck="false"></textarea>
+        <div class="panel-actions">
+          <button id="btn-apply-schema" class="btn" type="button">应用 Schema 重建表单</button>
+          <button id="btn-reload-demo" class="btn" type="button">恢复示例 Schema</button>
+          <span id="schema-status" class="load-status"></span>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>

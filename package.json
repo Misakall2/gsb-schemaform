@@ -1,0 +1,10 @@
+{
+  "name": "gsb-schemaform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "JSON Schema (draft-07 subset) driven form + validator in vanilla HTML/CSS/JS. No npm dependencies.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test 'test/**/*.test.js'"
+  }
+}
