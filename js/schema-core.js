@@ -36,6 +36,44 @@ function lookupPointer(root, pointer) {
   return node;
 }
 
+function isPlainSchemaObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Clone and inline every supported local $ref once. The caller is
+ * responsible for validating refs and proving the ref graph is acyclic.
+ */
+function expandSchema(root, resolve) {
+  const expandedNodes = new Map();
+
+  const cloneValue = (value) => {
+    if (Array.isArray(value)) return value.map(cloneValue);
+    if (isPlainSchemaObject(value)) return mapObject(value);
+    return value;
+  };
+
+  const mapObject = (node) => {
+    if (typeof node.$ref === "string") {
+      const target = resolve(node.$ref);
+      if (expandedNodes.has(target)) return expandedNodes.get(target);
+      const expanded = {};
+      expandedNodes.set(target, expanded);
+      Object.assign(expanded, mapObject(target));
+      return expanded;
+    }
+
+    const out = {};
+    for (const [key, value] of Object.entries(node)) {
+      if (key === "$ref") continue;
+      out[key] = cloneValue(value);
+    }
+    return out;
+  };
+
+  return mapObject(root);
+}
+
 /**
  * Schema kernel shared by the validator and the form renderer.
  * Both sides must go through resolveRef so they share one interpretation of
@@ -46,9 +84,10 @@ class SchemaRegistry {
     if (!rootSchema || typeof rootSchema !== "object") {
       throw new SF.SchemaError("Schema must be an object");
     }
-    this.root = rootSchema;
+    this.source = rootSchema;
     this._refGraph = null;
     this.assertRefGraphAcyclic();
+    this.root = expandSchema(rootSchema, (ref) => this.resolve(ref));
   }
 
   /**
@@ -72,22 +111,14 @@ class SchemaRegistry {
       );
     }
     const pointer = ref.slice(1); // strip leading '#'
-    return lookupPointer(this.root, pointer);
+    return lookupPointer(this.source, pointer);
   }
 
   /** Follow $ref chains until an ordinary schema object is reached. */
   deref(schema) {
-    let current = schema;
-    const seen = new Set();
-    while (current && typeof current === "object" && typeof current.$ref === "string") {
-      const ref = current.$ref;
-      if (seen.has(ref)) {
-        throw new SF.SchemaError(`Cyclic $ref chain detected at ${ref}`);
-      }
-      seen.add(ref);
-      current = this.resolve(ref);
-    }
-    return current;
+    // The normalized root has every $ref inlined once. This remains as a
+    // compatibility shim for callers written against the old Registry API.
+    return schema;
   }
 
   // --- cycle detection over the whole definitions graph ---
@@ -173,7 +204,7 @@ class SchemaRegistry {
       }
     };
 
-    visit(this.root);
+    visit(this.source);
     this._refGraph = graph;
     return graph;
   }
@@ -215,6 +246,7 @@ function walkSubschemas(schema, fn) {
   SF.pointerDecode = pointerDecode;
   SF.parsePointer = parsePointer;
   SF.buildPointer = buildPointer;
+  SF.expandSchema = expandSchema;
   SF.SchemaRegistry = SchemaRegistry;
   SF.walkSubschemas = walkSubschemas;
   return SF;

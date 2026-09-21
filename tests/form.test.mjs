@@ -6,6 +6,7 @@ installDomShim();
 
 const { SchemaForm } = (await import("../js/form.js")).default;
 const { validate } = (await import("../js/validator.js")).default;
+const { createObjectLayout, buildControlTree } = (await import("../js/schema-layout.js")).default;
 
 const schema = {
   type: "object",
@@ -152,6 +153,33 @@ test("oneOf：显式选择的支之外，其他支的残留字段不进入提交
   const result = f.submit();
   assert.deepEqual(result.data, { payment: { cardNo: "1234" } });
   assert.equal(result.valid, true);
+});
+
+test("布局引擎只依据数据层 branches 出树，且连续计算不污染 schema", () => {
+  const schema = {
+    type: "object",
+    properties: { kind: { enum: ["a", "b"] } },
+    if: { properties: { kind: { const: "a" } }, required: ["kind"] },
+    then: { required: ["aField"], properties: { aField: { type: "string" } } },
+    else: { required: ["bField"], properties: { bField: { type: "string" } } },
+  };
+  const layoutA = createObjectLayout(schema, { kind: "a" });
+  assert.deepEqual([...layoutA.required], ["aField"]);
+  const layoutB = createObjectLayout(schema, { kind: "b" });
+  assert.deepEqual([...layoutB.required], ["bField"]);
+  assert.equal(schema.required, undefined);
+
+  const union = {
+    oneOf: [
+      { type: "object", properties: { cardNo: { type: "string" } } },
+      { type: "object", properties: { balance: { type: "number" } } },
+    ],
+  };
+  const tree = buildControlTree(union, { balance: 1 }, [], new Map([["", 1]]), "");
+  assert.equal(tree.kind, "oneOf");
+  assert.equal(tree.selected, 1);
+  assert.equal(tree.branch.kind, "object");
+  assert.deepEqual(tree.branch.children.map((node) => node.pointer), ["/balance"]);
 });
 
 test("if/then/else：email 行渲染 primary，phone 行渲染 sms，不同时出现", () => {

@@ -64,16 +64,18 @@ string 输入框在中文输入法组字期间（`compositionstart`~`composition
 index.html        页面
 styles.css        样式
 demo-schema.js    演示用 schema + 示例数据
-js/schema-core.js SchemaRegistry：$ref 解析、JSON Pointer、成环检测（唯一规则来源）
-js/validator.js   校验器（与表单共用同一份 schema 和同一个 Registry）
-js/form.js        SchemaForm：出表、控件事件、错误挂载、JSON 回填
+js/schema-core.js   规范化、本地 $ref 展开、JSON Pointer、成环检测
+js/schema-layout.js 数据层布局：条件计算、显隐/裁剪、纯控件树生成
+js/validator.js     只吃规范化后的 schema 树并产出路径级错误
+js/form.js          状态、控件事件、DOM 渲染、错误挂载、JSON 回填
 js/errors.js      SchemaError（schema 本身有问题时抛出）
 tests/            Node 内置 test runner 的测试
 ```
 
-出表和校验是两套代码，但都走 `js/schema-core.js` 的 `SchemaRegistry`
-（同一份 `$ref` 解析与成环规则），且提交/回填时表单直接调用 `validate`，
-不会各写各的规则。
+页面构造 `SchemaRegistry` 时会先做 schema 合法性检查和一次性 `$ref`
+展开；validator 和 form 后续都吃同一棵规范化树。`oneOf` 的选支状态保存在
+表单数据层的 `branches` Map 中；`if/then/else`、dependencies、`allOf`
+的字段显隐和有效对象视图统一由 `schema-layout.js` 计算，渲染层不再自行判断条件。
 
 ## 跑测试
 

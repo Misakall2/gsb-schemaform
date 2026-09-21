@@ -276,6 +276,37 @@ test("同一 Registry 可被复用于多次校验（出表器与校验器共享�
   assert.equal(validate("1", registry.root, registry).valid, false);
 });
 
+test("规范化只展开一次：校验树中不再保留任何 $ref，原 schema 不被改写", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      payment: {
+        oneOf: [
+          { $ref: "#/definitions/card" },
+          { $ref: "#/definitions/balance" },
+        ],
+      },
+    },
+    definitions: {
+      card: { type: "object", required: ["cardNo"], properties: { cardNo: { type: "string" } } },
+      balance: { type: "object", required: ["balance"], properties: { balance: { type: "number" } } },
+    },
+  };
+  const registry = new SchemaRegistry(schema);
+  const refs = [];
+  const walk = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (Object.prototype.hasOwnProperty.call(node, "$ref")) refs.push(node.$ref);
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(walk);
+      else if (value && typeof value === "object") walk(value);
+    }
+  };
+  walk(registry.root);
+  assert.deepEqual(refs, []);
+  assert.equal(schema.properties.payment.oneOf[0].$ref, "#/definitions/card");
+});
+
 test("allOf: 多支必须同时满足，失败时指出是哪一支", () => {
   const schema = {
     type: "object",
