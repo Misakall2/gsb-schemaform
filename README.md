@@ -18,7 +18,6 @@
 ```bash
 # 任选其一，然后打开 http://localhost:8000
 python3 -m http.server 8000
-npx serve .
 ```
 
 - 左栏是根据 schema 生成的表单，右栏实时显示 JSON。
@@ -64,16 +63,22 @@ string 输入框在中文输入法组字期间（`compositionstart`~`composition
 index.html        页面
 styles.css        样式
 demo-schema.js    演示用 schema + 示例数据
-js/schema-core.js SchemaRegistry：$ref 解析、JSON Pointer、成环检测（唯一规则来源）
-js/validator.js   校验器（与表单共用同一份 schema 和同一个 Registry）
-js/form.js        SchemaForm：出表、控件事件、错误挂载、JSON 回填
-js/errors.js      SchemaError（schema 本身有问题时抛出）
+js/schema-normalize.js 规范化 schema（深拷贝，保持原语义）
+js/schema-core.js      SchemaRegistry：JSON Pointer、本文件 $ref 解析、成环检测
+js/schema-expand.js    $ref 一次性展开，输出校验器和出表器共享的树
+js/schema-layout.js    if/then/else、allOf、dependencies 的统一数据布局计算
+js/schema-model.js     JSON 数据、oneOf 选支、回填推断、隐藏值剪枝
+js/control-tree.js     从展开 schema + 数据模型生成控件树
+js/validator.js        只消费展开后的 schema 树做校验
+js/form.js             SchemaForm：控件事件、DOM 渲染、错误挂载、JSON 回填
+js/errors.js           SchemaError（schema 本身有问题时抛出）
 tests/            Node 内置 test runner 的测试
 ```
 
-出表和校验是两套代码，但都走 `js/schema-core.js` 的 `SchemaRegistry`
-（同一份 `$ref` 解析与成环规则），且提交/回填时表单直接调用 `validate`，
-不会各写各的规则。
+一份外部 schema 进入页面后只编译一次：规范化、循环检测、`$ref` 展开
+得到同一棵 schema 树，校验器和控件树都消费它。oneOf 选支状态只存在
+`SchemaModel` 的数据层，隐藏的 if/then/else、dependencies 和未选中的
+oneOf 分支值都会在数据层剪掉，DOM 只负责展示当前控件树。
 
 ## 跑测试
 

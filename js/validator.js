@@ -44,10 +44,10 @@ const TYPE_LABEL = {
  * those stay on the normal property loop, while the branch run adds
  * the branch's extra constraints on top.
  */
-function collectBranchOwnedProps(reg, validate, rootSchema, value, baseProps) {
+function collectBranchOwnedProps(deref, validate, rootSchema, value, baseProps) {
   const owned = new Set();
   const visit = (sc, isActive) => {
-    const d = reg.deref(sc);
+    const d = deref(sc);
     if (!d || typeof d !== "object") return;
     if (isActive && d.properties) {
       for (const k of Object.keys(d.properties)) {
@@ -63,7 +63,7 @@ function collectBranchOwnedProps(reg, validate, rootSchema, value, baseProps) {
       }
     }
     if (d.if) {
-      const on = validate(value, d.if, reg).valid;
+      const on = SF.evaluateCondition(value, d.if, validate);
       visit(d.then, isActive && on);
       visit(d.else, isActive && !on);
     }
@@ -77,14 +77,22 @@ function collectBranchOwnedProps(reg, validate, rootSchema, value, baseProps) {
  * Returns { valid, errors:[{path, message, keyword}] }.
  * Throws SchemaError when the schema itself is broken (bad/cyclic $ref ...).
  */
-function validate(data, schema, registry) {
-  const reg = registry || new SF.SchemaRegistry(schema);
+function validate(data, schemaOrCompiled, maybeCompiled) {
+  let suppliedCompiled = null;
+  let schema = schemaOrCompiled;
+  if (arguments.length === 2 && schemaOrCompiled instanceof SF.CompiledSchema) {
+    suppliedCompiled = schemaOrCompiled;
+    schema = suppliedCompiled.root;
+  } else if (maybeCompiled instanceof SF.CompiledSchema) {
+    suppliedCompiled = maybeCompiled;
+  } else if (!maybeCompiled) {
+    suppliedCompiled = SF.compileSchema(schemaOrCompiled);
+    schema = suppliedCompiled.root;
+  }
+  const reg = suppliedCompiled ? suppliedCompiled.registry :
+    (maybeCompiled && maybeCompiled.resolve ? maybeCompiled : new SF.SchemaRegistry(schema));
+  const deref = (node) => (suppliedCompiled ? node : reg.deref(node));
   const errors = [];
-  const pathStack = [];
-
-  const err = (keyword, message) => {
-    errors.push({ path: SF.buildPointer(pathStack), keyword, message });
-  };
 
   // Merge an active then/else object-schema into the one above it, so the
   // branch is validated exactly once instead of twice (merged properties +
@@ -113,14 +121,14 @@ function validate(data, schema, registry) {
   // whose trigger property is present. Used to widen additionalProperties:
   // false so merged-in keys are not reported as unknown. Nested
   // if/then/else/allOf inside a contributing branch are followed too.
-  const collectAllowedProps = (nodeSchema, value, out) => {
+  const collectAllowedProps = (nodeSchema, value, out, subValidate) => {
     const follow = (sc) => {
-      const d = reg.deref(sc);
+      const d = deref(sc);
       if (!d || typeof d !== "object") return;
       if (d.properties) Object.keys(d.properties).forEach((k) => out.add(k));
       if (d.if) {
-        const cond = validate(value, d.if, reg);
-        follow(cond.valid ? d.then : d.else);
+        const on = SF.evaluateCondition(value, d.if, subValidate);
+        follow(on ? d.then : d.else);
       }
       if (Array.isArray(d.allOf)) d.allOf.forEach(follow);
       if (d.dependencies) {
@@ -136,7 +144,7 @@ function validate(data, schema, registry) {
   };
 
   // Flatten the chain of active then/else branches for an object value.
-  const flattenObjectSchema = (nodeSchema, value) => {
+  const flattenObjectSchema = (nodeSchema, value, subValidate) => {
     let cur = nodeSchema;
     const seen = new Set();
     let depth = 0;
@@ -144,20 +152,20 @@ function validate(data, schema, registry) {
       if (seen.has(cur)) break; // structurally reused schema node
       seen.add(cur);
       depth += 1;
-      const cond = validate(value, cur.if, reg);
-      const picked = reg.deref(cond.valid ? cur.then : cur.else);
+      const on = SF.evaluateCondition(value, cur.if, subValidate);
+      const picked = deref(on ? cur.then : cur.else);
       if (!picked || typeof picked !== "object") break;
       cur = mergeObjectSchema(cur, picked);
     }
     return cur;
   };
 
-  const run = (nodeSchema, value, refStack, prefix = "") => {
+  const run = (nodeSchema, value, refStack, prefix = "", pathStack = [], targetErrors = errors) => {
     // Local error reporter: when a branch (allOf / dependency schema) runs
     // in place of a sub-validator, every failure message is tagged with
     // the branch label so the UI can say WHICH branch rejected the value.
     const err = (keyword, message) => {
-      errors.push({
+      targetErrors.push({
         path: SF.buildPointer(pathStack),
         keyword,
         message: prefix ? prefix + message : message,
@@ -165,12 +173,15 @@ function validate(data, schema, registry) {
     };
     let s = nodeSchema;
     if (s && typeof s === "object" && typeof s.$ref === "string") {
+      if (suppliedCompiled) {
+        throw new SF.SchemaError(`Unexpected unexpanded $ref at ${SF.buildPointer(pathStack) || "/"}`);
+      }
       // draft-07: siblings of $ref are ignored.
       if (refStack.includes(s.$ref)) {
         throw new SF.SchemaError(`Cyclic $ref chain detected at ${s.$ref}`);
       }
       refStack = [...refStack, s.$ref];
-      s = reg.deref(s);
+      s = deref(s);
     }
     if (!s || typeof s !== "object") return;
     if (s.type && !checkType(value, s.type)) {
@@ -205,7 +216,7 @@ function validate(data, schema, registry) {
       if (s.items && !Array.isArray(s.items)) {
         value.forEach((item, i) => {
           pathStack.push(i);
-          run(s.items, item, refStack);
+          run(s.items, item, refStack, prefix, pathStack, targetErrors);
           pathStack.pop();
         });
       }
@@ -228,7 +239,8 @@ function validate(data, schema, registry) {
 
     // For object values the active conditional branch is flattened in;
     // primitives/arrays keep running the branch schema separately below.
-    const eff = useObjectSemantics && s.if ? flattenObjectSchema(s, value) : s;
+    const subValidate = makeSubValidator(pathStack, targetErrors, refStack, prefix);
+    const eff = useObjectSemantics && s.if ? flattenObjectSchema(s, value, subValidate) : s;
 
     if (useObjectSemantics) {
       const props = eff.properties || {};
@@ -242,7 +254,7 @@ function validate(data, schema, registry) {
       }
       if (eff.additionalProperties === false) {
         const allowed = new Set(Object.keys(props));
-        collectAllowedProps(eff, value, allowed);
+        collectAllowedProps(eff, value, allowed, subValidate);
         for (const key of Object.keys(value)) {
           if (!allowed.has(key)) {
             pathStack.push(key);
@@ -251,14 +263,14 @@ function validate(data, schema, registry) {
           }
         }
       }
-      const branchOwned = collectBranchOwnedProps(reg, validate, eff, value, props);
+      const branchOwned = collectBranchOwnedProps(deref, subValidate, eff, value, props);
       for (const key of Object.keys(value)) {
         // Branch-only keys (allOf / active dependency schemas) are
         // validated by the branch runs below, so each failure gets
         // attributed to the branch that imposed it.
         if (Object.prototype.hasOwnProperty.call(props, key) && !branchOwned.has(key)) {
           pathStack.push(key);
-          run(props[key], value[key], refStack, prefix);
+          run(props[key], value[key], refStack, prefix, pathStack, targetErrors);
           pathStack.pop();
         }
       }
@@ -278,7 +290,7 @@ function validate(data, schema, registry) {
               }
             }
           } else if (dep && typeof dep === "object") {
-            run(dep, value, refStack, `字段 "${trigger}" 的依赖约束：`);
+            run(dep, value, refStack, `字段 "${trigger}" 的依赖约束：`, pathStack, targetErrors);
           }
         }
       }
@@ -287,7 +299,7 @@ function validate(data, schema, registry) {
     if (Array.isArray(eff.oneOf)) {
       const matched = [];
       eff.oneOf.forEach((branch, i) => {
-        const sub = validate(value, branch, reg);
+        const sub = makeSubValidator(pathStack, targetErrors, refStack, prefix)(value, branch);
         if (sub.valid) matched.push(i);
       });
       if (matched.length === 0) err("oneOf", "不符合任何一个可选项");
@@ -304,25 +316,47 @@ function validate(data, schema, registry) {
         : s.allOf;
     if (Array.isArray(allOfBranches)) {
       allOfBranches.forEach((branch, i) => {
-        const before = errors.length;
-        run(branch, value, refStack, `${prefix}allOf 第 ${i + 1} 支（共 ${allOfBranches.length} 支）：`);
-        if (errors.length > before) {
+        const before = targetErrors.length;
+        run(
+          branch,
+          value,
+          refStack,
+          `${prefix}allOf 第 ${i + 1} 支（共 ${allOfBranches.length} 支）：`,
+          pathStack,
+          targetErrors
+        );
+        if (targetErrors.length > before) {
           err("allOf", `未通过 allOf 的第 ${i + 1} 支（${allOfBranches.length} 支必须同时满足）`);
         }
       });
     }
 
     if (s.if && !useObjectSemantics) {
-      const cond = validate(value, s.if, reg);
-      if (cond.valid) {
-        if (s.then) run(s.then, value, refStack);
+      const on = SF.evaluateCondition(value, s.if, subValidate);
+      if (on) {
+        if (s.then) run(s.then, value, refStack, prefix, pathStack, targetErrors);
       } else if (s.else) {
-        run(s.else, value, refStack);
+        run(s.else, value, refStack, prefix, pathStack, targetErrors);
       }
     }
   };
 
-  run(schema, data, []);
+  function makeSubValidator(parentPathStack, parentErrors, parentRefStack, parentPrefix) {
+    return (value, nodeSchema) => {
+      const nodeErrors = [];
+      run(
+        nodeSchema,
+        value,
+        [...parentRefStack],
+        parentPrefix,
+        [...parentPathStack],
+        nodeErrors
+      );
+      return { valid: nodeErrors.length === 0, errors: nodeErrors };
+    };
+  }
+
+  run(schema, data, [], "", [], errors);
   return { valid: errors.length === 0, errors };
 }
 
@@ -330,7 +364,14 @@ function validate(data, schema, registry) {
 (function (root, factory) {
   const SF = (root.SF = root.SF || {});
   if (typeof module === "object" && module.exports) {
-    Object.assign(SF, require("./errors.js"), require("./schema-core.js"));
+    Object.assign(
+      SF,
+      require("./errors.js"),
+      require("./schema-core.js"),
+      require("./schema-normalize.js"),
+      require("./schema-expand.js"),
+      require("./schema-layout.js")
+    );
     module.exports = factory(SF);
   } else {
     factory(SF);
